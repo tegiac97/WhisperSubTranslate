@@ -344,7 +344,8 @@ function ensureDirectories() {
 function safeBasename(filename, fallbackExt = '') {
   const ext = path.extname(filename || '');
   const base = path.basename(filename || `file${fallbackExt}`, ext || fallbackExt);
-  return base.replace(/[^a-zA-Z0-9._-]/g, '_');
+  // Only replace characters illegal on Windows: \ / : * ? " < > | and control chars
+  return base.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_');
 }
 
 async function ensureModel(modelName) {
