@@ -60,12 +60,60 @@ app.use('/outputs', express.static(OUTPUT_DIR));
 
 ensureDirectories();
 
+// ===== GPU detection =====
+const CUDA12_MIN_COMPUTE = 5.0;
+let _gpuInfoCache = null;
+
+function getGpuInfo() {
+  if (_gpuInfoCache !== null) return _gpuInfoCache;
+  try {
+    const raw = execSync(
+      'nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader',
+      { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }
+    ).trim();
+    if (!raw) { _gpuInfoCache = { available: false }; return _gpuInfoCache; }
+    const parts = raw.split('\n')[0].split(',').map((s) => s.trim());
+    const name = parts[0] || 'Unknown GPU';
+    const computeCap = parseFloat(parts[1]) || 0;
+    _gpuInfoCache = {
+      available: true,
+      name,
+      computeCap,
+      cudaCompatible: computeCap >= CUDA12_MIN_COMPUTE
+    };
+    console.log(`[GPU] ${name}, Compute ${computeCap}, CUDA12 ok: ${_gpuInfoCache.cudaCompatible}`);
+  } catch (_err) {
+    try {
+      execSync('nvidia-smi -L', { stdio: 'ignore', timeout: 2000 });
+      _gpuInfoCache = { available: true, name: 'Unknown NVIDIA GPU', computeCap: 0, cudaCompatible: false };
+    } catch (_err2) {
+      _gpuInfoCache = { available: false };
+    }
+  }
+  return _gpuInfoCache;
+}
+
+function resolveDevice(requested) {
+  const req = String(requested || 'auto').toLowerCase();
+  const gpu = getGpuInfo();
+  if (req === 'auto') return (gpu.available && gpu.cudaCompatible) ? 'cuda' : 'cpu';
+  if (req === 'cuda') return (gpu.available && gpu.cudaCompatible) ? 'cuda' : 'cpu';
+  return 'cpu';
+}
+
+// ===========================
+
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     service: 'WhisperSubTranslate API',
     timestamp: new Date().toISOString()
   });
+});
+
+app.get('/api/gpu', (_req, res) => {
+  const info = getGpuInfo();
+  res.json({ ok: true, gpu: info });
 });
 
 app.get('/api/models', (_req, res) => {
@@ -177,6 +225,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
   const model = String(req.body?.model || DEFAULT_MODEL);
   const language = String(req.body?.language || DEFAULT_LANGUAGE);
+  const device = resolveDevice(req.body?.device);
   const cliPath = resolveWhisperCliPath();
 
   if (!cliPath) {
@@ -194,11 +243,9 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
     const srtPath = `${outputBase}.srt`;
 
     const args = ['-m', modelPath, '-f', wavPath, '-osrt', '-of', outputBase];
-    if (language && language !== 'auto') {
-      args.push('-l', language);
-    } else {
-      args.push('-l', 'auto');
-    }
+    args.push('-l', (language && language !== 'auto') ? language : 'auto');
+    if (device !== 'cuda') args.push('-ng'); // disable GPU when not using CUDA
+    console.log(`[Extract] device=${device}, args: ${args.join(' ')}`);
 
     await runCommand(cliPath, args);
 
@@ -207,6 +254,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
     return res.json({
       ok: true,
+      device,
       outputFile: path.basename(srtPath),
       downloadUrl: `${BASE_URL}/outputs/${encodeURIComponent(path.basename(srtPath))}`
     });
@@ -226,6 +274,7 @@ app.post('/api/extract-and-translate', upload.single('file'), async (req, res) =
   const method = String(req.body?.method || 'mymemory');
   const targetLang = String(req.body?.targetLang || 'ko');
   const sourceLang = String(req.body?.sourceLang || 'auto');
+  const device = resolveDevice(req.body?.device);
 
   const cliPath = resolveWhisperCliPath();
   if (!cliPath) {
@@ -245,6 +294,8 @@ app.post('/api/extract-and-translate', upload.single('file'), async (req, res) =
 
     const args = ['-m', modelPath, '-f', wavPath, '-osrt', '-of', base];
     args.push('-l', language === 'auto' ? 'auto' : language);
+    if (device !== 'cuda') args.push('-ng'); // disable GPU when not using CUDA
+    console.log(`[Extract+Translate] device=${device}, args: ${args.join(' ')}`);
 
     await runCommand(cliPath, args);
     await translator.translateSRTFile(extractedSrt, translatedSrt, method, targetLang, null, sourceLang);
@@ -254,6 +305,7 @@ app.post('/api/extract-and-translate', upload.single('file'), async (req, res) =
 
     return res.json({
       ok: true,
+      device,
       extracted: {
         outputFile: path.basename(extractedSrt),
         downloadUrl: `${BASE_URL}/outputs/${encodeURIComponent(path.basename(extractedSrt))}`
