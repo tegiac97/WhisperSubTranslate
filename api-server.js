@@ -54,9 +54,33 @@ const upload = multer({
   }
 });
 
+const API_TOKEN = process.env.API_TOKEN || '';
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
-app.use('/outputs', express.static(OUTPUT_DIR));
+
+function requireAuth(req, res, next) {
+  if (!API_TOKEN) return next(); // auth disabled when API_TOKEN is not set
+  const header = req.headers['authorization'] || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token || token !== API_TOKEN) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized: invalid or missing Bearer token' });
+  }
+  next();
+}
+
+// Protect all /api/* routes
+app.use('/api', requireAuth);
+
+// Protected file download — requires same Bearer token
+app.get('/outputs/:filename', requireAuth, (req, res) => {
+  const filename = path.basename(req.params.filename); // prevent path traversal
+  const filePath = path.join(OUTPUT_DIR, filename);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ ok: false, error: 'File not found' });
+  }
+  res.download(filePath);
+});
 
 ensureDirectories();
 
@@ -331,6 +355,7 @@ app.use((error, _req, res, _next) => {
 app.listen(PORT, HOST, () => {
   console.log(`[API] Listening on ${HOST}:${PORT}`);
   console.log(`[API] Health: ${BASE_URL}/health`);
+  console.log(`[API] Auth: ${API_TOKEN ? 'enabled (Bearer token required)' : 'DISABLED (set API_TOKEN env var to enable)'}`);
 });
 
 function ensureDirectories() {
